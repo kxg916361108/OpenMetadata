@@ -354,22 +354,13 @@ public class DatabaseServiceResourceIT
     IngestionPipeline pipeline =
         SdkClients.adminClient().ingestionPipelines().create(pipelineRequest);
 
-    ListParams params = new ListParams();
-    params.setLimit(1000);
-    params.setFields("pipelines");
-    ListResponse<DatabaseService> response = listEntities(params);
-
-    DatabaseService listed =
-        response.getData().stream()
-            .filter(s -> s.getId().equals(service.getId()))
-            .findFirst()
-            .orElse(null);
-    assertNotNull(listed, "Created service should be present in list response");
+    DatabaseService listed = getEntityWithFields(service.getId().toString(), "pipelines");
+    assertNotNull(listed, "Created service should be retrievable by ID");
     assertNotNull(
-        listed.getPipelines(), "fields=pipelines must populate pipelines on the list endpoint");
+        listed.getPipelines(), "fields=pipelines must populate pipelines on the service endpoint");
     assertTrue(
         listed.getPipelines().stream().anyMatch(p -> p.getId().equals(pipeline.getId())),
-        "List response should include the ingestion pipeline for the service");
+        "Service should include the ingestion pipeline when fields=pipelines");
   }
 
   @Test
