@@ -28,7 +28,10 @@ import { cloneDeep, debounce, isEqual, isNil, isUndefined } from 'lodash';
 import { FC, useCallback, useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
-import { KNOWLEDGE_CENTER_CLASSIFICATION, PAGE_SIZE } from '../../../constants/constants';
+import {
+  KNOWLEDGE_CENTER_CLASSIFICATION,
+  PAGE_SIZE,
+} from '../../../constants/constants';
 import { getKnowledgePageFields } from '../../../constants/KnowledgeCenter.constant';
 import { OperationPermission } from '../../../context/PermissionProvider/PermissionProvider.interface';
 import { EntityType } from '../../../enums/entity.enum';
@@ -56,10 +59,10 @@ import {
   getEntityReferenceFromEntity,
 } from '../../../utils/EntityUtils';
 import i18n from '../../../utils/i18next/LocalUtil';
-import { getFilterTags } from '../../../utils/TableTags/TableTags.utils';
-import { getTagsWithoutTier } from '../../../utils/TableUtils';
 import { isValidUrl } from '../../../utils/SSOUtils';
 import { escapeESReservedCharacters } from '../../../utils/StringUtils';
+import { getFilterTags } from '../../../utils/TableTags/TableTags.utils';
+import { getTagsWithoutTier } from '../../../utils/TableUtils';
 import tagClassBase from '../../../utils/TagClassBase';
 import { getTagDisplay } from '../../../utils/TagsUtils';
 import { showErrorToast, showSuccessToast } from '../../../utils/ToastUtils';
@@ -233,19 +236,28 @@ export const QuickLinkFormModal: FC<QuickLinkFormModalProps> = ({
     try {
       const response = await searchGlossaryTerms(searchText);
       const hits = response?.hits?.hits ?? [];
-      const options = hits.map((hit: { _source: { fullyQualifiedName?: string; displayName?: string; name?: string; description?: string } }) => {
-        const source = hit._source;
+      const options = hits.map(
+        (hit: {
+          _source: {
+            fullyQualifiedName?: string;
+            displayName?: string;
+            name?: string;
+            description?: string;
+          };
+        }) => {
+          const source = hit._source;
 
-        return mapTagLabelToSelectItem({
-          labelType: LabelType.Manual,
-          source: TagSource.Glossary,
-          state: State.Confirmed,
-          tagFQN: source.fullyQualifiedName ?? '',
-          displayName: source.displayName,
-          name: source.name,
-          description: source.description,
-        });
-      });
+          return mapTagLabelToSelectItem({
+            labelType: LabelType.Manual,
+            source: TagSource.Glossary,
+            state: State.Confirmed,
+            tagFQN: source.fullyQualifiedName ?? '',
+            displayName: source.displayName,
+            name: source.name,
+            description: source.description,
+          });
+        }
+      );
 
       setGlossaryOptions(options);
     } catch {
@@ -544,9 +556,7 @@ export const QuickLinkFormModal: FC<QuickLinkFormModalProps> = ({
               form={form}
               onSubmit={form.handleSubmit(handleFormSubmit)}>
               {getField(displayNameField)}
-              <div>
-                {getField(urlField)}
-              </div>
+              <div>{getField(urlField)}</div>
               {getField(descriptionField)}
               {getField(tagsField)}
               {getField(glossaryTermsField)}
