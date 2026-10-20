@@ -24,6 +24,8 @@ services:
     command: "--sort_buffer_size=10M"
     container_name: openmetadata_mysql
     restart: always
+    # TES-51: 与 openmetadata-server 同理 —— 上限只存在于运行时,重建即丢。声明化。
+    mem_limit: 2.5g
     depends_on:
       - elasticsearch
     environment:
@@ -47,8 +49,12 @@ services:
     container_name: openmetadata_elasticsearch
     environment:
       - discovery.type=single-node
-      - ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms1024m -Xmx1024m}
+      # TES-51: 堆 1024m -> 512m。依据:265 实体 / 7 780 行,ES 堆实际只用 ~236 MB。
+      # 数据在 es-data 卷里,重建容器不重建索引。要让 .env 覆写生效请显式设 ES_JAVA_OPTS。
+      - ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}
       - xpack.security.enabled=false
+    # 保留 TES-48 用 `docker update` 打上的运行时上限,否则本文件一重建就丢回无上限。
+    mem_limit: 3g
     networks:
       - local_app_net
     expose:
@@ -306,6 +312,9 @@ services:
       context: ../../.
       dockerfile: docker/development/Dockerfile
     container_name: openmetadata_server
+    # TES-51: 该上限以前只存在于 `docker update` 的运行时状态里,任何一次 compose 重建
+    # 都会把它丢回 HostConfig.Memory=0(整机)。写进文件才是可重建的声明。
+    mem_limit: 2.5g
     environment:
       OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
       SERVER_PORT: ${SERVER_PORT:-8585}
@@ -314,6 +323,9 @@ services:
       # cleartext HTTP/2 at Jetty. Admin connector stays HTTP/1.1 regardless.
       SERVER_PROTOCOL: ${SERVER_PROTOCOL:-http}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # UI assets live in a separate classpath jar (see the volumes below) because
+      # the source build skips the UI bundle.
+      EXT_CLASSPATH: /opt/openmetadata/ui-assets.jar
 
       # OpenMetadata Server Authentication Configuration
       AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
@@ -510,6 +522,13 @@ services:
       - "8585:8585"
       - "8586:8586"
       - "5005:5005"
+    volumes:
+      # The local source build (`mvn -DskipUI`) ships no UI assets, which makes
+      # IndexResource fail at startup: it loads /assets/index.html from the
+      # classpath, logs "Running in no-ui mode", and the web root returns 500
+      # while the API keeps working. This jar (built from openmetadata-ui/dist,
+      # entries under assets/) is added to the classpath via EXT_CLASSPATH.
+      - ./ui-assets.jar:/opt/openmetadata/ui-assets.jar:ro
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -529,11 +548,25 @@ services:
       args:
         INGESTION_DEPENDENCY: ${INGESTION_DEPENDENCY:-all}
     container_name: openmetadata_ingestion
+    # TES-51: 采集容器是采集时临时起的大件(restart=no),此前 HostConfig.Memory=0
+    # (上限=VM 全量),实测峰值 1.63 GB,把 VM MemAvailable 从 1 602 MB 打到 889 MB。
+    # 上限取 2048 MB 而非 1536 MB:1.63 GB 的峰值压到 1.5 GB 会把它自己 OOM。
+    # memswap_limit 与 mem_limit 相等 = 该容器不借 swap,避免把整台 VM 拖进换页。
+    # 写在这里而不是事后 docker update:该容器每次采集都重建,docker update 留不住。
+    mem_limit: 2048m
+    memswap_limit: 2048m
     environment:
       AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      # 使用 OpenMetadata 自带 MySQL 的 airflow_db(而不是容器内 SQLite),
+      # 这样调度历史/连接随容器重建仍保留。
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "mysql+mysqldb://airflow_user:airflow_pass@mysql:3306/airflow_db"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__LOGGING__LOGGING_LEVEL: ${AIRFLOW_LOGGING_LEVEL:-DEBUG}
       AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
+      # The OM server runs on the host (IDE). Airflow must reach it back via host.docker.internal
+      # without going through the local proxy baked into the ingestion image.
+      no_proxy: "localhost,127.0.0.1,ingestion,mysql,elasticsearch,openmetadata-server,host.docker.internal"
+      NO_PROXY: "localhost,127.0.0.1,ingestion,mysql,elasticsearch,openmetadata-server,host.docker.internal"
       # OpenLineage transport config (optional - enable for lineage via OL)
       # AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type": "http", "url": "http://openmetadata-server:8585/api/v1/openlineage/", "endpoint": "lineage", "auth": {"type": "api_key", "api_key": "<OM_JWT_TOKEN>"}}'
       # AIRFLOW__OPENLINEAGE__NAMESPACE: local_airflow
