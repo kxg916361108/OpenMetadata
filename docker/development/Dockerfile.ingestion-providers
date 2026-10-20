@@ -1,0 +1,64 @@
+#
+# TES-53 F1 · 给活调度器补上 MySQL provider
+#
+# 为什么需要这一层:
+#   `openmetadata_ingestion` 是当前唯一在跑的 Airflow(3.3.1)调度器宿主,
+#   但它镜像里**没有** apache-airflow-providers-mysql —— 实测
+#   `airflow dags reserialize` 报
+#   `ModuleNotFoundError: No module named 'airflow.providers.mysql'`,
+#   `MySqlHook` 不可用,`doris_events_contract_check` 在这台调度器上
+#   永远解析不了(DAG 文件在卷里、DB 里有历史 run,但 import 失败)。
+#   镜像里 `mysql` 类型连接因此被 CLI 降级成 `generic`。
+#
+# 为什么不在容器里 `pip install`:
+#   容器是"每次采集重建"的一次性宿主,exec 进去装的包重建即丢 ——
+#   和 TES-51 的 mem_limit 同一个教训:只存在于运行时的状态等于没有。
+#
+# 为什么 `--no-deps`:
+#   基础镜像已带 mysqlclient 2.1.1 / apache-airflow-providers-common-sql 2.1.0 /
+#   mysql-connector-python 26.7.0,pip 的默认解析会去**编译** mysqlclient 的 sdist
+#   (镜像里没有 mysql 头文件)→ `Failed to build 'mysqlclient'`。providers-mysql
+#   的依赖在这台机器上已全部满足,钉住版本裸装即可。
+#
+# 构建顺序(基础镜像必须先在):
+#   docker build -f ../../../ingestion/Dockerfile.ci \
+#     --build-arg INGESTION_DEPENDENCY=all -t development-ingestion ../../..
+#   docker build -f Dockerfile.ingestion-providers \
+#     --build-arg BASE_IMAGE=development-ingestion -t development-ingestion:tes53 .
+#   docker compose up -d --no-deps --force-recreate ingestion
+#
+# 回滚:把 compose 里 ingestion 的 build/image 换回
+#   build: {context: ../../., dockerfile: ingestion/Dockerfile.ci}
+# 并去掉 image: 行,再 `docker compose up -d --no-deps --force-recreate ingestion`。
+
+ARG BASE_IMAGE=development-ingestion
+FROM ${BASE_IMAGE}
+
+# 基础镜像的默认用户就是 airflow(uid 50000),airflow 包装在 /home/airflow/.local,
+# 与 `pip list` 显示的 site-packages 路径一致 —— user install 才落在 PATH 上。
+USER airflow
+
+RUN pip install --no-cache-dir --no-deps --user \
+      "apache-airflow-providers-mysql==6.7.1"
+
+# TES-85 · 进程级守护:三进程同起 + wait -n
+#
+# 基础镜像里那份 /opt/airflow/ingestion_dependency.sh 尾部是
+# `nohup airflow api-server &` + `nohup airflow dag-processor &` + 前台 `airflow scheduler`
+# —— 只有 scheduler 死了会让容器退出,api-server / dag-processor 死了没人知道
+# (TES-78 事故的直接成因)。补丁在仓库的 ingestion/ingestion_dependency.sh,
+# 由 metadata-governance 的 scripts/tes85_window.py(apply)在构建前拷成
+# ./ingestion_dependency.sh.staged
+# (单一口径在 git 里,这里只放一份构建期的 staging 副本)。
+#
+# 构建期自检:`bash -n` + 必须含 `wait -n` —— 把「镜像里还是旧脚本」挡在构建阶段,
+# 而不是等窗口后再发现守护没生效(和上面 providers-mysql 的 import 自检同一个理由)。
+COPY --chown=airflow:0 --chmod=775 ingestion_dependency.sh.staged /opt/airflow/ingestion_dependency.sh
+RUN bash -n /opt/airflow/ingestion_dependency.sh \
+ && grep -q 'TES-85 supervision block' /opt/airflow/ingestion_dependency.sh \
+ && grep -q 'wait -n' /opt/airflow/ingestion_dependency.sh \
+ && echo "TES-85 supervision script ok"
+
+# 构建期自检:把"装了但 import 不到"挡在构建阶段,而不是等调度器静默不解析 DAG。
+RUN python -c "from airflow.providers.mysql.hooks.mysql import MySqlHook; \
+print('providers-mysql ok, conn_type =', MySqlHook.conn_type)"

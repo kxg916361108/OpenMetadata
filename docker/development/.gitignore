@@ -1,0 +1,3 @@
+# TES-85: 构建期 staging 副本,由 scripts/tes85_window.py / Dockerfile.ingestion-providers 生成。
+# 单一口径是 ../../ingestion/ingestion_dependency.sh —— 这里只是 docker build context 的搬运工。
+ingestion_dependency.sh.staged
