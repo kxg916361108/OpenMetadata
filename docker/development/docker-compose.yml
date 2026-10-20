@@ -542,25 +542,46 @@ services:
       test: [ "CMD", "wget", "-q", "--spider",  "http://localhost:8586/healthcheck" ]
   
   ingestion:
+    # TES-53 F1: 镜像派生一层,补 apache-airflow-providers-mysql(见
+    # Dockerfile.ingestion-providers)。这台容器是当前唯一在跑的 Airflow 调度器,
+    # 没有 MySQL provider → `MySqlHook` 不可用 → doris_events_contract_check
+    # import 失败且**不显性报错**(DB 有历史 run、卷里有文件)。
+    # 基础镜像 development-ingestion 必须先用上游 Dockerfile.ci 构建好,
+    # 回滚方式写在 Dockerfile.ingestion-providers 头部。
     build:
-      context: ../../.
-      dockerfile: ingestion/Dockerfile.ci
+      context: .
+      dockerfile: Dockerfile.ingestion-providers
       args:
-        INGESTION_DEPENDENCY: ${INGESTION_DEPENDENCY:-all}
+        BASE_IMAGE: ${INGESTION_BASE_IMAGE:-development-ingestion}
+    image: development-ingestion:tes53
     container_name: openmetadata_ingestion
     # TES-51: 采集容器是采集时临时起的大件(restart=no),此前 HostConfig.Memory=0
     # (上限=VM 全量),实测峰值 1.63 GB,把 VM MemAvailable 从 1 602 MB 打到 889 MB。
     # 上限取 2048 MB 而非 1536 MB:1.63 GB 的峰值压到 1.5 GB 会把它自己 OOM。
+    # TES-51 复核后改为 2560 MB:复测期间该容器 cgroup anon 稳定 1 700 MB、峰值 1 908 MB,
+    # 2048 只剩 ~140 MB 余量(93% 利用率),打满的形态是采集中断而不是内存失控。
+    # 证据:evidence/capacity_ingest_peak_2026-10-20.json。2560 仍比"无上限"少 5 GB 多暴露面。
     # memswap_limit 与 mem_limit 相等 = 该容器不借 swap,避免把整台 VM 拖进换页。
     # 写在这里而不是事后 docker update:该容器每次采集都重建,docker update 留不住。
-    mem_limit: 2048m
-    memswap_limit: 2048m
+    mem_limit: 2560m
+    memswap_limit: 2560m
     environment:
       AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
       # 使用 OpenMetadata 自带 MySQL 的 airflow_db(而不是容器内 SQLite),
       # 这样调度历史/连接随容器重建仍保留。
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "mysql+mysqldb://airflow_user:airflow_pass@mysql:3306/airflow_db"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      # TES-53 F2: 固定 fernet key。
+      # 未设时 Airflow 每个进程各自生成随机 key(容器里 $AIRFLOW_HOME 下没有
+      # fernet_key 文件可复用),于是 connections 里的口令只有"写它的那个进程"
+      # 解得开:`airflow connections get` 抛 cryptography.fernet.InvalidToken,
+      # OM 托管 DAG import 报 `Not Authorized! The given token does not match
+      # the current bot's token!`,airflow_lineage_operator 报
+      # `conn_id openmetadata_conn_id isn't defined` —— 每次容器重建就换一次 key,
+      # 所有已存加密口令集体失效。
+      # 值与 data-dev/docker-compose.yml 的 airflow 服务同一个(两份 Airflow
+      # 共用同一批连接口令时不必换 key);dev 环境的口令本就明文在这里,不是新暴露。
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-qPf2gWhphCb3OeB6J-5sEbg-ofAORxI5pf65N5D3Kmo=}
       AIRFLOW__LOGGING__LOGGING_LEVEL: ${AIRFLOW_LOGGING_LEVEL:-DEBUG}
       AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: "/opt/airflow/dag_generated_configs"
       # The OM server runs on the host (IDE). Airflow must reach it back via host.docker.internal
