@@ -571,6 +571,14 @@ services:
       # 这样调度历史/连接随容器重建仍保留。
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "mysql+mysqldb://airflow_user:airflow_pass@mysql:3306/airflow_db"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      # TES-117: LocalExecutor 为每个 parallelism 槽常驻一个 `airflow worker` 进程。
+      # 镜像默认 parallelism=32 -> 空闲态就有 33 个 worker,配 2560m 上限实测稳态
+      # 1.98–2.16 GiB(79–86%),剩下不够一条 ≈1 GB 的 CLI(`airflow dags list-runs`
+      # 之类),api-server 一被挤死就出现「run 建得出来、task 派不下去」。
+      # 本批 DAG 是 5~6 个串行 task,4 并发足够;worker 进程数降到 ≤6。
+      # 声明在这里而不是改 airflow.cfg:该文件随镜像重建被覆盖(同 mem_limit 的理由)。
+      AIRFLOW__CORE__PARALLELISM: 4
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: 4
       # TES-53 F2: 固定 fernet key。
       # 未设时 Airflow 每个进程各自生成随机 key(容器里 $AIRFLOW_HOME 下没有
       # fernet_key 文件可复用),于是 connections 里的口令只有"写它的那个进程"
