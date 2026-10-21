@@ -1,0 +1,40 @@
+#
+# TES-137 · 让 dag-processor.log 可被安全轮转(O_APPEND + 宿主侧 bind mount)
+#
+# 为什么需要这一层(而不是 bind mount 一个脚本):
+#   挂载一份脚本到 /opt/airflow/ingestion_dependency.sh 会在**下一次换镜像后静默遮蔽**
+#   镜像里的新脚本 —— TES-85(三进程 wait -n 监护)正是要改这个文件,挂载会让它
+#   「构建成功、运行没生效」,这是本仓库反复吃过的一类 bug。所以改动烘进镜像、
+#   用新 tag 标注,`docker inspect` 一眼能看出在跑哪一版。
+#
+# 本层只做一件事:把入口脚本换成 append 模式(见 ingestion_dependency.tes137.sh 头部)。
+# 基础镜像是**当前在跑的** development-ingestion:tes53,因此 TES-53 的
+# providers-mysql 层原样保留;镜像里没有 TES-85 的监护块(= 本次不动进程监护语义)。
+#
+# 构建:
+#   docker build -f Dockerfile.tes137-logs \
+#     --build-arg BASE_IMAGE=development-ingestion:tes53 \
+#     -t development-ingestion:tes137 .
+#
+# 回滚:compose 里把
+#   build.dockerfile 换回 Dockerfile.ingestion-providers、image 换回 development-ingestion:tes53,
+# 去掉 /opt/airflow/logs 的 bind mount,再 `docker compose up -d --no-build ingestion`。
+# (脚本:scripts/tes137_log_persistence_change.sh --rollback)
+
+ARG BASE_IMAGE=development-ingestion:tes53
+FROM ${BASE_IMAGE}
+
+USER airflow
+
+COPY --chown=airflow:0 --chmod=775 ingestion_dependency.tes137.sh /opt/airflow/ingestion_dependency.sh
+
+# 构建期自检:把「镜像里还是 `>`」挡在构建阶段。`>` 与 `>>` 只差一个字符,
+# 靠人眼 review 不可靠 —— 这里用 grep 证明 append 语义真的进了镜像。
+RUN bash -n /opt/airflow/ingestion_dependency.sh \
+ && grep -qF 'dag-processor >> /opt/airflow/logs/dag-processor.log' /opt/airflow/ingestion_dependency.sh \
+ && grep -qF 'api-server --port 8080 >> /opt/airflow/logs/api-server.log' /opt/airflow/ingestion_dependency.sh \
+ && ! grep -qE '^[^#]*dag-processor >[^>]' /opt/airflow/ingestion_dependency.sh \
+ && ! grep -qE '^[^#]*api-server --port 8080 >[^>]' /opt/airflow/ingestion_dependency.sh \
+ && grep -q 'TES-137 entrypoint rev=1' /opt/airflow/ingestion_dependency.sh \
+ && grep -qF 'log_rotate.py --dir /opt/airflow/logs' /opt/airflow/ingestion_dependency.sh \
+ && echo "TES-137 append-mode entrypoint ok (with in-container rotation loop)"

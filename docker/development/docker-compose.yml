@@ -548,12 +548,14 @@ services:
     # import 失败且**不显性报错**(DB 有历史 run、卷里有文件)。
     # 基础镜像 development-ingestion 必须先用上游 Dockerfile.ci 构建好,
     # 回滚方式写在 Dockerfile.ingestion-providers 头部。
+    # TES-137: 派生层只换入口脚本的**重定向语义**(`>` → `>>`,append 模式),
+    # 让宿主侧 copytruncate 轮转安全。见 Dockerfile.tes137-logs 头部。
     build:
       context: .
-      dockerfile: Dockerfile.ingestion-providers
+      dockerfile: Dockerfile.tes137-logs
       args:
-        BASE_IMAGE: ${INGESTION_BASE_IMAGE:-development-ingestion}
-    image: development-ingestion:tes53
+        BASE_IMAGE: ${INGESTION_BASE_IMAGE:-development-ingestion:tes53}
+    image: development-ingestion:tes137
     container_name: openmetadata_ingestion
     # TES-51: 采集容器是采集时临时起的大件(restart=no),此前 HostConfig.Memory=0
     # (上限=VM 全量),实测峰值 1.63 GB,把 VM MemAvailable 从 1 602 MB 打到 889 MB。
@@ -680,6 +682,20 @@ services:
       - ingestion-volume-dag-airflow:/opt/airflow/dag_generated_configs
       - ingestion-volume-dags:/opt/airflow/dags
       - ingestion-volume-tmp:/tmp
+      # TES-137: /opt/airflow/logs 此前**不在任何 volume 里** —— 它在容器可写层,
+      # 一次重建整份消失(实测代价:611 MB 的 dag-processor.log 随旧容器一起销毁,
+      # INC-2026-10-21-02 的 10.08 h 静默证据只剩提前切出的窗口切片)。
+      # 宿主 bind mount(而不是命名卷)的三个理由:
+      #   1. 文件在宿主文件系统上,轮转/归档/取证都不必进容器;
+      #   2. `du -sh` 能直接量,不必 exec;
+      #   3. 命名卷被 `docker volume prune` 掉就等于没有。
+      # 目录属主:容器 uid 50000(airflow,gid 0),宿主目录 0777 —— 实测 uid 50000 可写。
+      - ./docker-volume/airflow-logs:/opt/airflow/logs
+      # TES-137: 轮转脚本只存一份(宿主仓库 scripts/airflow_log_rotate.py),只读挂进容器。
+      # 不 COPY 进镜像是因为构建上下文是本目录(OpenMetadata 仓),复制会变成两份会漂移的副本;
+      # 宿主 cron 在本机装不上(`crontab <file>` 静默挂死),所以由入口脚本里的容器内守护每 10 分钟调它。
+      # 挂载丢失时的形态:python3 报 "can't open file",打印在 docker logs 里(不会静默)。
+      - ../../../metadata-governance/scripts/airflow_log_rotate.py:/opt/airflow/log_rotate.py:ro
       - /var/run/docker.sock:/var/run/docker.sock:z  # Need 600 permissions to run DockerOperator
 
 
