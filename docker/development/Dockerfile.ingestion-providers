@@ -59,6 +59,25 @@ RUN bash -n /opt/airflow/ingestion_dependency.sh \
  && grep -q 'wait -n' /opt/airflow/ingestion_dependency.sh \
  && echo "TES-85 supervision script ok"
 
+# TES-137 · 构建期自检:日志持久化三条不变量必须在镜像里
+#
+#   1. dag-processor 用 `>>` 打开日志(appends,不是 truncate)—— 没有 O_APPEND 就没法
+#      「先归档再截断」:写端继续写旧偏移,活文件变成 NUL 空洞。
+#   2. 启动时**不** `: >` 截断日志文件 —— 它们现在挂的是宿主目录(TES-137 的 bind mount),
+#      截断等于每次重建销毁上一代历史。
+#   3. 有容器内轮转守护(sleep 600 + log_rotate.py)—— 换镜像时最容易丢的就是这一段,
+#      丢了以后日志无界增长且**不会报错**。
+#
+# 这三条靠人记就会丢,所以钉在构建阶段:任何 base / 脚本替换只要破坏其中一条,构建直接失败。
+RUN bash -n /opt/airflow/ingestion_dependency.sh \
+ && grep -q 'dag-processor >>' /opt/airflow/ingestion_dependency.sh \
+ && grep -q 'TES-137 rotation daemon' /opt/airflow/ingestion_dependency.sh \
+ && grep -q 'sleep 600' /opt/airflow/ingestion_dependency.sh \
+ && if grep -qE '^: > ' /opt/airflow/ingestion_dependency.sh; then \
+      echo "TES-137: startup truncation (: >) 又回来了 —— 会销毁宿主挂载里的历史" >&2; exit 1; \
+    fi \
+ && echo "TES-137 log persistence invariants ok (append + no-start-truncate + rotate daemon)"
+
 # 构建期自检:把"装了但 import 不到"挡在构建阶段,而不是等调度器静默不解析 DAG。
 RUN python -c "from airflow.providers.mysql.hooks.mysql import MySqlHook; \
 print('providers-mysql ok, conn_type =', MySqlHook.conn_type)"

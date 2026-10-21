@@ -105,7 +105,18 @@ mkdir -p "$SUPERVISE_LOG_DIR"
 API_LOG="$SUPERVISE_LOG_DIR/api-server.log"
 DP_LOG="$SUPERVISE_LOG_DIR/dag-processor.log"
 SCHED_LOG="$SUPERVISE_LOG_DIR/scheduler.log"
-: > "$API_LOG"; : > "$DP_LOG"; : > "$SCHED_LOG"
+# >>> TES-137 · 启动时**不截断**日志(它们现在在宿主 bind mount 上)>>>
+# 原来这一行是 `: > "$API_LOG"; : > "$DP_LOG"; : > "$SCHED_LOG"`。
+# TES-137 把 /opt/airflow/logs 挂成宿主目录之后,启动时 `:` 截断会把**上一代容器**写下的
+# 历史一起抹掉 —— 那正是「重建即全丢」这个缺陷本身。改成 append + 一条会话横幅:
+# 两代容器在同一个文件里可分辨,历史不丢。
+# 前提:append 语义是宿主侧 copytruncate 轮转(scripts/airflow_log_rotate.py)能安全工作的条件。
+# 若某个入口脚本改回 `>`,轮转截断后进程会继续写旧偏移,文件头部变成 NUL 空洞(实测过)。
+SES_BANNER="===== container session start $(date -u +%Y-%m-%dT%H:%M:%SZ) · TES-137 append-mode (no truncate) ====="
+printf '\n%s\n' "$SES_BANNER" >> "$API_LOG"
+printf '\n%s\n' "$SES_BANNER" >> "$DP_LOG"
+printf '\n%s\n' "$SES_BANNER" >> "$SCHED_LOG"
+# <<< TES-137 · 启动不截断 <<<
 
 echo "Starting Airflow 3.x components (supervised: api-server / dag-processor / scheduler)..."
 
@@ -119,6 +130,24 @@ SCHED_PID=$!
 
 echo "supervised pids: api-server=$API_PID dag-processor=$DP_PID scheduler=$SCHED_PID"
 echo "supervised logs: $SUPERVISE_LOG_DIR"
+
+# >>> TES-137 · 容器内日志轮转守护 >>>
+# 为什么守护跑在容器里,而不是宿主 cron/launchd(实测结论,别再改回去):
+#   宿主没有 logrotate;`newsyslog` 是改名(fd 仍指旧 inode,等于没轮转);
+#   `crontab <file>` 在本机静默挂死(行装不进 live 表);`launchctl bootstrap` 在受管会话被禁。
+# 脚本本体只存一份(宿主仓库 scripts/airflow_log_rotate.py,只读 bind mount 进来),
+# 这里只起一个 600s 的拍子;输出进容器 stdout,由 json-file(50m×60+compress)兜底。
+# 关掉:AIRFLOW_LOG_ROTATE_DAEMON=0;换脚本:AIRFLOW_LOG_ROTATE_SCRIPT=<path>。
+# 少了这个守护 = 日志恢复无界增长(1.0 GB/day),而且**不会有任何报错**。
+LOG_ROTATE_SCRIPT=${AIRFLOW_LOG_ROTATE_SCRIPT:-/opt/airflow/log_rotate.py}
+if [ "${AIRFLOW_LOG_ROTATE_DAEMON:-1}" = "1" ] && [ -f "$LOG_ROTATE_SCRIPT" ]; then
+  nohup bash -c "while true; do sleep 600; python3 \"$LOG_ROTATE_SCRIPT\" --dir \"$SUPERVISE_LOG_DIR\" --container '' || echo \"TES137 rotate rc=\$?\"; done" &
+  ROTATE_PID=$!
+  echo "TES-137 rotation daemon pid=$ROTATE_PID every 600s script=$LOG_ROTATE_SCRIPT"
+else
+  echo "TES-137 rotation daemon NOT started (script=$LOG_ROTATE_SCRIPT missing or AIRFLOW_LOG_ROTATE_DAEMON=0)" >&2
+fi
+# <<< TES-137 · 容器内日志轮转守护 <<<
 
 supervise_shutdown() {
   local code=${1:-0}
