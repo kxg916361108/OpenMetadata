@@ -565,6 +565,30 @@ services:
     # 写在这里而不是事后 docker update:该容器每次采集都重建,docker update 留不住。
     mem_limit: 2560m
     memswap_limit: 2560m
+    # TES-134: 容器 stdout 是 scheduler / api-server / executor 唯一的日志出口
+    # (`/opt/airflow/logs` 下没有 scheduler 文件日志,只有 dag-processor.log)。
+    # 改前是镜像默认 json-file 20m×5 = 100 MB:实测 12.87 MB/h(DEBUG,本批 DAG 的常态)
+    # ⇒ 只覆盖 **7.8 小时**。INC-2026-10-21-02 停摆 10.08 h 后复盘时,窗口内的
+    # scheduler 行早就被轮转掉了 —— 这就是本单要修的东西。
+    # 现在的算术(全部来自实测,见 evidence/tes134/tes134_evidence.json):
+    #   raw 实测 308.8~364.0 MB/day(364 是 10-21 补数批次在跑时的峰值);同内容 gzip 13.9×
+    #   50 MB × 60 文件 = 3000 MB raw = **8.2 天(按峰值 364 MB/day)/ 9.7 天(按常态)**;
+    #   落盘 ≈ 50 MB + 59×50/13.9 ≈ **262 MB**(改前 100 MB,净增 ~162 MB,VM 剩余 2.6 GB)。
+    # 取 60 而不取刚够 7 天的 44:日志量随批次密度变化(同一天里 308→364 MB/day),
+    # 按"刚好 7 天"配会在忙的那周掉回 6 天。
+    # compress=true 只压已轮转的文件:实测 docker logs 能透明读 .gz,
+    # 且 max-file 严格生效(超出的最老文件被丢),见同目录 docs/tes134-log-retention.md。
+    # 这里不降到 INFO:本批排障依据的正是 DEBUG 行
+    # (dependency 'Not In Retry Period' / 'Ran scheduling loop' / 每拍决策),
+    # 降级等于把证据本身删掉,靠压缩比换天数才是对的方向。
+    # 声明在 compose 里而不是 docker update:log 配置**不是** docker update 能改的字段,
+    # 且该容器每次采集/变更都会重建,写在 compose 才会随重建生效。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "60"
+        compress: "true"
     environment:
       AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
       # 使用 OpenMetadata 自带 MySQL 的 airflow_db(而不是容器内 SQLite),
